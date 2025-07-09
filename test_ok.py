@@ -1,28 +1,26 @@
 import socket
 import time
 import os
-import logging # Importa il modulo logging
-import json    # Potrebbe essere utile per loggare oggetti complessi come JSON
-from pyais import decode
+import logging
+import json
+import sys # Importa il modulo sys per gli argomenti da riga di comando
 
 # --- CONFIGURAZIONE LOGGING ---
-LOG_DIRECTORY = "/app/storage" # La cartella 'storage' creata nel Dockerfile
+LOG_DIRECTORY = "/app/storage"
 LOG_FILE_NAME = "ais_decoded.log"
 LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, LOG_FILE_NAME)
 
 # Assicurati che la directory di log esista
 os.makedirs(LOG_DIRECTORY, exist_ok=True)
 
-# Configura il logger
 logging.basicConfig(
-    level=logging.INFO, # Logga messaggi di livello INFO e superiori
-    format='%(asctime)s - %(levelname)s - %(message)s', # Formato del log
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE_PATH), # Scrive i log su file
-        logging.StreamHandler() # E anche sulla console (stdout/stderr)
+        logging.FileHandler(LOG_FILE_PATH),
+        logging.StreamHandler()
     ]
 )
-# Ottieni un logger specifico per il tuo script
 logger = logging.getLogger(__name__)
 # --- FINE CONFIGURAZIONE LOGGING ---
 
@@ -31,27 +29,54 @@ logger = logging.getLogger(__name__)
 BUFFER_SIZE = 1024 
 
 def read_and_parse_moxa_ais_stream_interactive():
-    # Leggi l'indirizzo IP dalle variabili d'ambiente
-    moxa_ip = os.getenv("MOXA_IP", "192.168.1.100") 
-    
-    # Leggi la porta dalle variabili d'ambiente
-    moxa_port_str = os.getenv("MOXA_PORT", "10001") 
-    
+    moxa_ip = None
+    moxa_port_str = None
+    source_info = "Default"
+
+    # 1. Tenta di leggere da Variabili d'Ambiente
+    moxa_ip = os.getenv("MOXA_IP")
+    moxa_port_str = os.getenv("MOXA_PORT")
+    if moxa_ip and moxa_port_str:
+        source_info = "Variabili d'Ambiente"
+    else:
+        # 2. Tenta di leggere da Argomenti della Riga di Comando
+        # sys.argv[0] è il nome dello script
+        if len(sys.argv) >= 3: # Aspettiamo almeno 2 argomenti: IP e Porta
+            moxa_ip = sys.argv[1]
+            moxa_port_str = sys.argv[2]
+            source_info = "Riga di Comando"
+        else:
+            # 3. Fallback a Input Interattivo
+            logger.info("IP e Porta Moxa non trovati in variabili d'ambiente o riga di comando.")
+            try:
+                moxa_ip = input("Inserisci l'indirizzo IP del Moxa (es. 192.168.1.100): ").strip()
+                moxa_port_str = input("Inserisci la porta TCP del Moxa (es. 10001): ").strip()
+                source_info = "Input Interattivo"
+            except EOFError:
+                logger.error("EOFError: Impossibile leggere l'input. Il container non è interattivo o lo stdin è chiuso.")
+                logger.error("Si prega di configurare MOXA_IP e MOXA_PORT tramite variabili d'ambiente o argomenti da riga di comando.")
+                return # Esci se non si riesce a ottenere l'input
+
+    # Convalida della porta
     try:
         moxa_port = int(moxa_port_str)
         if not (0 <= moxa_port <= 65535):
             raise ValueError(f"La porta {moxa_port_str} non è valida. Deve essere tra 0 e 65535.")
-    except ValueError as e:
-        logger.error(f"Errore nella porta fornita via variabile d'ambiente: {e}")
-        logger.error("Assicurati che le variabili d'ambiente MOXA_PORT siano numeri validi.")
-        return 
+    except (ValueError, TypeError) as e: # Aggiunto TypeError per il caso in cui moxa_port_str sia None
+        logger.error(f"Errore nella porta fornita ({source_info}): {e}")
+        logger.error("Assicurati che la porta sia un numero valido.")
+        return # Termina lo script se la porta non è valida o mancante
+
+    if not moxa_ip: # Nel caso in cui moxa_ip non sia stato impostato da nessuna delle fonti
+        logger.error("Indirizzo IP del Moxa non fornito. Terminazione.")
+        return
 
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5) 
+        sock.settimeout(5)
 
-        logger.info(f"Tentativo di connessione a {moxa_ip}:{moxa_port} (ottenuto da variabili d'ambiente)...")
+        logger.info(f"Tentativo di connessione a {moxa_ip}:{moxa_port} (Fonte: {source_info})...")
         sock.connect((moxa_ip, moxa_port))
         logger.info("Connessione stabilita con successo!")
         logger.info(f"In attesa dello stream AIS. I log verranno scritti in {LOG_FILE_PATH}")
@@ -90,7 +115,6 @@ def read_and_parse_moxa_ais_stream_interactive():
                         
                         if raw_nmea_message_str.startswith(('!', '$')):
                             try:
-                                # Stampa il messaggio RAW sulla console (INFO)
                                 logger.info(f"RAW NMEA: {raw_nmea_message_str}")
                                 
                                 decoded_ais_message = decode(raw_nmea_message_str)
@@ -98,17 +122,15 @@ def read_and_parse_moxa_ais_stream_interactive():
                                 if decoded_ais_message:
                                     logger.info("--- Messaggio AIS Decodificato ---")
                                     
-                                    # Formatta i dati decodificati per il log
                                     log_data = {
-                                        "timestamp": time.time(), # Aggiungi un timestamp per la decodifica
+                                        "timestamp": time.time(),
                                         "raw_nmea": raw_nmea_message_str,
                                         "msg_type": decoded_ais_message.msg_type,
                                         "mmsi": decoded_ais_message.mmsi,
                                         "decoded_fields": {}
                                     }
 
-                                    # Estrai campi comuni per loggare
-                                    if decoded_ais_message.msg_type in [1, 2, 3]: # Messaggi di posizione
+                                    if decoded_ais_message.msg_type in [1, 2, 3]:
                                         log_data["decoded_fields"] = {
                                             "status": getattr(decoded_ais_message, 'status', 'N/A'),
                                             "lat": getattr(decoded_ais_message, 'lat', 'N/A'),
@@ -117,7 +139,7 @@ def read_and_parse_moxa_ais_stream_interactive():
                                             "course": getattr(decoded_ais_message, 'course', 'N/A'),
                                             "heading": getattr(decoded_ais_message, 'heading', 'N/A')
                                         }
-                                    elif decoded_ais_message.msg_type == 5: # Dati nave statici
+                                    elif decoded_ais_message.msg_type == 5:
                                         log_data["decoded_fields"] = {
                                             "shipname": getattr(decoded_ais_message, 'shipname', 'N/A'),
                                             "ship_type": getattr(decoded_ais_message, 'ship_type', 'N/A'),
@@ -130,25 +152,21 @@ def read_and_parse_moxa_ais_stream_interactive():
                                                 "to_starboard": getattr(decoded_ais_message, 'to_starboard', 'N/A')
                                             }
                                         }
-                                    # Puoi estendere questa logica per altri tipi di messaggi
                                     else:
-                                        # Per tipi sconosciuti o meno comuni, logga tutti gli attributi pubblici
                                         for field in decoded_ais_message.__dataclass_fields__:
                                             attr_value = getattr(decoded_ais_message, field)
                                             if not field.startswith('_') and not callable(attr_value):
                                                 log_data["decoded_fields"][field] = attr_value
 
-                                    # Logga l'oggetto decodificato come stringa JSON per facile parsing futuro
                                     logger.info(f"DECODED AIS (JSON): {json.dumps(log_data)}")
                                     
                                 else:
                                     logger.warning(f"AVVISO: Nessun oggetto decodificato da pyais per: {raw_nmea_message_str}")
 
                             except Exception as e:
-                                logger.error(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}", exc_info=True) # exc_info=True logga la traceback
-
+                                logger.error(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}", exc_info=True)
                         else:
-                            logger.debug(f"RAW non NMEA (saltato): {raw_nmea_message_str}") # Usiamo DEBUG per non inondare i log con non-AIS
+                            logger.debug(f"RAW non NMEA (saltato): {raw_nmea_message_str}")
                 else:
                     break
             
