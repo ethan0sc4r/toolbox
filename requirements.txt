@@ -1,3 +1,4 @@
 attrs
 bitarray
 pyais
+websockets
