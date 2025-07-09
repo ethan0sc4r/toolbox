@@ -31,6 +31,7 @@ COPY requirements.txt .
 
 # Installa le dipendenze Python elencate in requirements.txt.
 # --no-cache-dir evita di memorizzare nella cache i pacchetti scaricati, riducendo le dimensioni dell'immagine.
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
 
 RUN ap
