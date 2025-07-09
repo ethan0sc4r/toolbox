@@ -1,0 +1,52 @@
+# Usa un'immagine base Python ufficiale.
+# Scegli la versione di Python che preferisci (es. 3.9, 3.10, 3.11).
+# 'slim-buster' o 'slim-bullseye' sono versioni più piccole e leggere.
+FROM python:3.10-slim-buster
+
+# Imposta la directory di lavoro all'interno del container.
+# Tutti i comandi successivi verranno eseguiti in questa directory.
+WORKDIR /app
+
+# Non eseguire come utente root per motivi di sicurezza, specialmente su OpenShift.
+# OpenShift preferisce un utente non-root arbitrario.
+# Se la tua immagine base non ha un utente non-root, puoi crearne uno.
+# Per le immagini python-slim, l'utente 'python' esiste ed è non-root.
+# USER python
+
+# Installa le dipendenze di sistema necessarie per la compilazione di pyais (e altre librerie C/C++).
+# 'python3-dev' fornisce gli header di sviluppo Python.
+# 'build-essential' include compilatori come GCC e utility di build.
+# 'apt-get clean' e 'rm -rf /var/lib/apt/lists/*' riducono la dimensione finale dell'immagine.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3-dev \
+    build-essential && \
+    apt-get install nano \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copia il file requirements.txt nella directory di lavoro del container.
+COPY requirements.txt .
+
+
+# Installa le dipendenze Python elencate in requirements.txt.
+# --no-cache-dir evita di memorizzare nella cache i pacchetti scaricati, riducendo le dimensioni dell'immagine.
+RUN pip install --no-cache-dir -r requirements.txt
+RUN ap
+# Copia il tuo script Python nella directory di lavoro del container.
+COPY . .
+
+# Comando per avviare l'applicazione quando il container viene eseguito.
+# CMD ["python", "tuo_script.py"] è la forma raccomandata in Dockerfile.
+# Qui stiamo usando `moxa_ais_parser.py` come nome dello script.
+# Se lo script deve essere interattivo e chiedere input, `CMD` va bene.
+# Se invece volessi passargli IP e Porta come variabili d'ambiente (più comune in OpenShift),
+# si farebbe diversamente (es. ENTRYPOINT ["python", "moxa_ais_parser.py", "$MOXA_IP", "$MOXA_PORT"]).
+# Ma per il tuo caso di input interattivo, CMD ["python", ...] è corretto.
+CMD ["bash"]
+
+# Puoi anche specificare una porta che l'applicazione ascolta, se fosse un server.
+# Nel tuo caso è un client, quindi non strettamente necessario, ma utile per documentazione.
+# EXPOSE 10001 # Questa è la porta del Moxa, non la tua applicazione.
+# Se il tuo script Python dovesse diventare un server (come discusso per il TCP Client del Moxa),
+# allora esporresti quella porta, ad es. EXPOSE 5002
