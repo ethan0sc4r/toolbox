@@ -5,7 +5,8 @@ import logging
 import json
 import sys
 from pyais import decode
-from pyais.exceptions import UnknownMessageException # <--- AGGIUNGI QUESTO IMPORT
+from pyais.exceptions import UnknownMessageException, MissingMultipartMessageException # Importa anche questa eccezione
+from pyais.messages import NMEAMessageAssembler # <--- NUOVA IMPORTAZIONE
 
 
 # --- CONFIGURAZIONE LOGGING (resta come prima) ---
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # --- FINE CONFIGURAZIONE LOGGING ---
 
 
-# Configurazione generale del socket (resta come prima)
+# Configurazione generale del socket
 BUFFER_SIZE = 1024 
 
 def read_and_parse_moxa_ais_stream_interactive():
@@ -59,6 +60,12 @@ def read_and_parse_moxa_ais_stream_interactive():
         logger.info(f"In attesa dello stream AIS. I log verranno scritti in {LOG_FILE_PATH}")
 
         received_buffer = b""
+        
+        # --- NUOVA INIZIALIZZAZIONE DELL'ASSEMBLER ---
+        # Assembler per messaggi AIS multi-part
+        # Timeout predefinito dell'assembler è 1 secondo, puoi cambiarlo se necessario.
+        ais_assembler = NMEAMessageAssembler()
+        # --- FINE NUOVA INIZIALIZZAZIONE ---
 
         while True:
             data = sock.recv(BUFFER_SIZE)
@@ -73,23 +80,14 @@ def read_and_parse_moxa_ais_stream_interactive():
                 lf_index = received_buffer.find(b'\n')
 
                 delimiter_index = -1
-                if cr_index != -1 and lf_index != -1:
-                    delimiter_index = min(cr_index, lf_index)
-                elif cr_index != -1:
-                    delimiter_index = cr_index
-                elif lf_index != -1:
-                    delimiter_index = cr_index # Changed from lf_index to cr_index for consistency
-                # Correction: If only LF, use lf_index, if only CR, use cr_index
-                # Let's use a simpler and more robust approach: find the first occurrence of either.
-                if cr_index == -1 and lf_index == -1: # Neither found
+                if cr_index == -1 and lf_index == -1:
                     delimiter_index = -1
-                elif cr_index == -1: # Only LF found
+                elif cr_index == -1:
                     delimiter_index = lf_index
-                elif lf_index == -1: # Only CR found
+                elif lf_index == -1:
                     delimiter_index = cr_index
-                else: # Both found, pick the first one
+                else:
                     delimiter_index = min(cr_index, lf_index)
-
 
                 if delimiter_index != -1:
                     raw_nmea_message_bytes = received_buffer[:delimiter_index]
@@ -102,76 +100,88 @@ def read_and_parse_moxa_ais_stream_interactive():
                         raw_nmea_message_str = raw_nmea_message_bytes.decode('ascii', errors='ignore').strip()
                         
                         if raw_nmea_message_str.startswith(('!', '$')):
-                            # --- MODIFICA QUI: AGGIUNGI IL BLOCCO TRY-EXCEPT PER UnknownMessageException ---
+                            logger.info(f"RAW NMEA: {raw_nmea_message_str}") # Logga il messaggio RAW
+
+                            # --- MODIFICA QUI: USA L'ASSEMBLER ---
                             try:
-                                logger.info(f"RAW NMEA: {raw_nmea_message_str}")
-                                
-                                decoded_ais_message = decode(raw_nmea_message_str)
+                                # Aggiungi il frammento all'assembler
+                                assembled_message = ais_assembler.assemble(raw_nmea_message_str)
 
-                                if decoded_ais_message:
-                                    logger.info("\n--- Messaggio AIS Decodificato ---")
-                                    
-                                    log_data = {
-                                        "timestamp": time.time(),
-                                        "raw_nmea": raw_nmea_message_str,
-                                        "msg_type": decoded_ais_message.msg_type,
-                                        "mmsi": getattr(decoded_ais_message, 'mmsi', 'N/A'),
-                                        "decoded_fields": {}
-                                    }
+                                if assembled_message: # assembled_message sarà non-None solo quando un messaggio completo è pronto
+                                    try:
+                                        # Decodifica il messaggio AIS completo
+                                        decoded_ais_message = decode(assembled_message)
 
-                                    if decoded_ais_message.msg_type in [1, 2, 3]:
-                                        log_data["decoded_fields"] = {
-                                            "status": getattr(decoded_ais_message, 'status', 'N/A'),
-                                            "lat": getattr(decoded_ais_message, 'lat', 'N/A'),
-                                            "lon": getattr(decoded_ais_message, 'lon', 'N/A'),
-                                            "speed": getattr(decoded_ais_message, 'speed', 'N/A'),
-                                            "course": getattr(decoded_ais_message, 'course', 'N/A'),
-                                            "heading": getattr(decoded_ais_message, 'heading', 'N/A')
-                                        }
-                                    elif decoded_ais_message.msg_type == 5:
-                                        log_data["decoded_fields"] = {
-                                            "shipname": getattr(decoded_ais_message, 'shipname', 'N/A'),
-                                            "ship_type": getattr(decoded_ais_message, 'ship_type', 'N/A'),
-                                            "callsign": getattr(decoded_ais_message, 'callsign', 'N/A'),
-                                            "imo": getattr(decoded_ais_message, 'imo', 'N/A'),
-                                            "dimensions": {
-                                                "to_bow": getattr(decoded_ais_message, 'to_bow', 'N/A'),
-                                                "to_stern": getattr(decoded_ais_message, 'to_stern', 'N/A'),
-                                                "to_port": getattr(decoded_ais_message, 'to_port', 'N/A'),
-                                                "to_starboard": getattr(decoded_ais_message, 'to_starboard', 'N/A')
+                                        if decoded_ais_message:
+                                            logger.info("\n--- Messaggio AIS Decodificato ---")
+                                            
+                                            log_data = {
+                                                "timestamp": time.time(),
+                                                "raw_nmea": assembled_message, # Logga il messaggio completo assemblato
+                                                "msg_type": decoded_ais_message.msg_type,
+                                                "mmsi": getattr(decoded_ais_message, 'mmsi', 'N/A'),
+                                                "decoded_fields": {}
                                             }
-                                        }
-                                    elif decoded_ais_message.msg_type == 18:
-                                        log_data["decoded_fields"] = {
-                                            "lat": getattr(decoded_ais_message, 'lat', 'N/A'),
-                                            "lon": getattr(decoded_ais_message, 'lon', 'N/A'),
-                                            "speed": getattr(decoded_ais_message, 'speed', 'N/A'),
-                                            "course": getattr(decoded_ais_message, 'course', 'N/A'),
-                                            "unit": getattr(decoded_ais_message, 'unit', 'N/A')
-                                        }
-                                    elif decoded_ais_message.msg_type == 24:
-                                        log_data["decoded_fields"]["part_num"] = getattr(decoded_ais_message, 'part_num', 'N/A')
-                                        if hasattr(decoded_ais_message, 'shipname'):
-                                            log_data["decoded_fields"]["shipname"] = decoded_ais_message.shipname
-                                        if hasattr(decoded_ais_message, 'ship_type'):
-                                            log_data["decoded_fields"]["ship_type"] = decoded_ais_message.ship_type
-                                        if hasattr(decoded_ais_message, 'callsign'):
-                                            log_data["decoded_fields"]["callsign"] = decoded_ais_message.callsign
-                                    else:
-                                        log_data["decoded_fields"] = decoded_ais_message.to_dict()
-                                        log_data["decoded_fields"].pop('msg_type', None)
-                                        log_data["decoded_fields"].pop('mmsi', None)
 
-                                    logger.info(f"DECODED AIS (JSON): {json.dumps(log_data)}")
-                                    
-                                else:
-                                    logger.warning(f"AVVISO: Nessun oggetto decodificato da pyais per: {raw_nmea_message_str}")
+                                            # Logica di estrazione campi (resta come prima)
+                                            if decoded_ais_message.msg_type in [1, 2, 3]:
+                                                log_data["decoded_fields"] = {
+                                                    "status": getattr(decoded_ais_message, 'status', 'N/A'),
+                                                    "lat": getattr(decoded_ais_message, 'lat', 'N/A'),
+                                                    "lon": getattr(decoded_ais_message, 'lon', 'N/A'),
+                                                    "speed": getattr(decoded_ais_message, 'speed', 'N/A'),
+                                                    "course": getattr(decoded_ais_message, 'course', 'N/A'),
+                                                    "heading": getattr(decoded_ais_message, 'heading', 'N/A')
+                                                }
+                                            elif decoded_ais_message.msg_type == 5:
+                                                log_data["decoded_fields"] = {
+                                                    "shipname": getattr(decoded_ais_message, 'shipname', 'N/A'),
+                                                    "ship_type": getattr(decoded_ais_message, 'ship_type', 'N/A'),
+                                                    "callsign": getattr(decoded_ais_message, 'callsign', 'N/A'),
+                                                    "imo": getattr(decoded_ais_message, 'imo', 'N/A'),
+                                                    "dimensions": {
+                                                        "to_bow": getattr(decoded_ais_message, 'to_bow', 'N/A'),
+                                                        "to_stern": getattr(decoded_ais_message, 'to_stern', 'N/A'),
+                                                        "to_port": getattr(decoded_ais_message, 'to_port', 'N/A'),
+                                                        "to_starboard": getattr(decoded_ais_message, 'to_starboard', 'N/A')
+                                                    }
+                                                }
+                                            elif decoded_ais_message.msg_type == 18:
+                                                log_data["decoded_fields"] = {
+                                                    "lat": getattr(decoded_ais_message, 'lat', 'N/A'),
+                                                    "lon": getattr(decoded_ais_message, 'lon', 'N/A'),
+                                                    "speed": getattr(decoded_ais_message, 'speed', 'N/A'),
+                                                    "course": getattr(decoded_ais_message, 'course', 'N/A'),
+                                                    "unit": getattr(decoded_ais_message, 'unit', 'N/A')
+                                                }
+                                            elif decoded_ais_message.msg_type == 24:
+                                                log_data["decoded_fields"]["part_num"] = getattr(decoded_ais_message, 'part_num', 'N/A')
+                                                if hasattr(decoded_ais_message, 'shipname'):
+                                                    log_data["decoded_fields"]["shipname"] = decoded_ais_message.shipname
+                                                if hasattr(decoded_ais_message, 'ship_type'):
+                                                    log_data["decoded_fields"]["ship_type"] = decoded_ais_message.ship_type
+                                                if hasattr(decoded_ais_message, 'callsign'):
+                                                    log_data["decoded_fields"]["callsign"] = decoded_ais_message.callsign
+                                            else:
+                                                log_data["decoded_fields"] = decoded_ais_message.to_dict()
+                                                log_data["decoded_fields"].pop('msg_type', None)
+                                                log_data["decoded_fields"].pop('mmsi', None)
 
-                            except UnknownMessageException as e: # <--- CATTURA QUESTA ECCEZIONE
-                                # Questo cattura specificamente i messaggi NMEA validi ma non AIS (come $PELMSEC)
-                                logger.warning(f"AVVISO: Messaggio NMEA riconosciuto ma non decodificabile come AIS: {raw_nmea_message_str} - {e}")
-                            except Exception as e:
-                                logger.error(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}", exc_info=True)
+                                            logger.info(f"DECODED AIS (JSON): {json.dumps(log_data)}")
+                                            
+                                        else:
+                                            logger.warning(f"AVVISO: Nessun oggetto decodificato da pyais per messaggio completo: {assembled_message}")
+
+                                    except UnknownMessageException as e:
+                                        logger.warning(f"AVVISO: Messaggio NMEA assemblato ma non decodificabile come AIS: {assembled_message} - {e}")
+                                    except MissingMultipartMessageException as e: # <--- CATTURA QUESTA ECCEZIONE QUI
+                                        # Questo accade se l'assembler rilascia un messaggio non completo a causa di timeout interni
+                                        logger.warning(f"AVVISO: Eccezione di frammentazione messaggio AIS: {e} - messaggio parziale: {assembled_message}")
+                                    except Exception as e:
+                                        logger.error(f"ERRORE durante la decodifica AIS del messaggio assemblato '{assembled_message}': {e}", exc_info=True)
+
+                            except Exception as e: # Questo catch è per errori nell'assembler stesso o NMEA non valido
+                                logger.error(f"ERRORE durante l'assemblaggio del messaggio NMEA '{raw_nmea_message_str}': {e}", exc_info=True)
 
                         else:
                             logger.debug(f"RAW non NMEA: {raw_nmea_message_str}")
