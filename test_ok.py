@@ -1,55 +1,72 @@
 import socket
 import time
+import os
+import logging # Importa il modulo logging
+import json    # Potrebbe essere utile per loggare oggetti complessi come JSON
 from pyais import decode
-# Non abbiamo bisogno di importare Message esplicitamente da pyais per questo uso,
-# ma non fa male se lo si volesse per type hints o controlli più specifici.
 
-# Configurazione generale
-BUFFER_SIZE = 1024 # Dimensione del buffer per la ricezione dei dati
+# --- CONFIGURAZIONE LOGGING ---
+LOG_DIRECTORY = "/app/storage" # La cartella 'storage' creata nel Dockerfile
+LOG_FILE_NAME = "ais_decoded.log"
+LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, LOG_FILE_NAME)
+
+# Assicurati che la directory di log esista
+os.makedirs(LOG_DIRECTORY, exist_ok=True)
+
+# Configura il logger
+logging.basicConfig(
+    level=logging.INFO, # Logga messaggi di livello INFO e superiori
+    format='%(asctime)s - %(levelname)s - %(message)s', # Formato del log
+    handlers=[
+        logging.FileHandler(LOG_FILE_PATH), # Scrive i log su file
+        logging.StreamHandler() # E anche sulla console (stdout/stderr)
+    ]
+)
+# Ottieni un logger specifico per il tuo script
+logger = logging.getLogger(__name__)
+# --- FINE CONFIGURAZIONE LOGGING ---
+
+
+# Configurazione generale del socket
+BUFFER_SIZE = 1024 
 
 def read_and_parse_moxa_ais_stream_interactive():
-    # Richiedi l'indirizzo IP all'utente
-    moxa_ip = input("Inserisci l'indirizzo IP del Moxa (es. 192.168.1.100): ").strip()
+    # Leggi l'indirizzo IP dalle variabili d'ambiente
+    moxa_ip = os.getenv("MOXA_IP", "192.168.1.100") 
     
-    # Richiedi la porta all'utente e convertila a int
-    while True:
-        try:
-            moxa_port_str = input("Inserisci la porta TCP del Moxa (es. 10001): ").strip()
-            moxa_port = int(moxa_port_str)
-            if not (0 <= moxa_port <= 65535):
-                raise ValueError("La porta deve essere tra 0 e 65535.")
-            break
-        except ValueError as e:
-            print(f"Input non valido: {e}. Riprova.")
-
-    sock = None # Inizializza il socket a None
+    # Leggi la porta dalle variabili d'ambiente
+    moxa_port_str = os.getenv("MOXA_PORT", "10001") 
+    
     try:
-        # Crea un socket TCP/IP
+        moxa_port = int(moxa_port_str)
+        if not (0 <= moxa_port <= 65535):
+            raise ValueError(f"La porta {moxa_port_str} non è valida. Deve essere tra 0 e 65535.")
+    except ValueError as e:
+        logger.error(f"Errore nella porta fornita via variabile d'ambiente: {e}")
+        logger.error("Assicurati che le variabili d'ambiente MOXA_PORT siano numeri validi.")
+        return 
+
+    sock = None
+    try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5) 
 
-        # Aggiungi un timeout di connessione
-        sock.settimeout(5) # 5 secondi di timeout per la connessione
-
-        # Connettiti al dispositivo Moxa
-        print(f"Tentativo di connessione a {moxa_ip}:{moxa_port}...")
+        logger.info(f"Tentativo di connessione a {moxa_ip}:{moxa_port} (ottenuto da variabili d'ambiente)...")
         sock.connect((moxa_ip, moxa_port))
-        print("Connessione stabilita con successo!")
-        print("In attesa dello stream AIS...")
+        logger.info("Connessione stabilita con successo!")
+        logger.info(f"In attesa dello stream AIS. I log verranno scritti in {LOG_FILE_PATH}")
 
-        received_buffer = b"" # Buffer per accumulare i dati ricevuti
+        received_buffer = b""
 
         while True:
-            # Ricevi dati dal Moxa
             data = sock.recv(BUFFER_SIZE)
             if not data:
-                print("Connessione chiusa dal Moxa.")
+                logger.warning("Connessione chiusa dal Moxa.")
                 break
 
             received_buffer += data
 
-            # Processa i dati riga per riga, cercando i delimitatori (CR = 0x0D, LF = 0x0A)
             while b'\r' in received_buffer or b'\n' in received_buffer:
-                # Trova il primo delimitatore
                 cr_index = received_buffer.find(b'\r')
                 lf_index = received_buffer.find(b'\n')
 
@@ -62,109 +79,95 @@ def read_and_parse_moxa_ais_stream_interactive():
                     delimiter_index = lf_index
 
                 if delimiter_index != -1:
-                    # Estrai la riga completa e pulisci il buffer
                     raw_nmea_message_bytes = received_buffer[:delimiter_index]
                     received_buffer = received_buffer[delimiter_index + 1:]
 
-                    # Consuma il LF extra se il primo era CR
                     if raw_nmea_message_bytes.endswith(b'\r') and received_buffer.startswith(b'\n'):
-                        received_buffer = received_buffer[1:] # Rimuovi il LF dal buffer
+                        received_buffer = received_buffer[1:]
 
-                    if raw_nmea_message_bytes: # Processa solo se la riga non è vuota
-                        # Decodifica la riga grezza in stringa per il parsing AIS
+                    if raw_nmea_message_bytes:
                         raw_nmea_message_str = raw_nmea_message_bytes.decode('ascii', errors='ignore').strip()
                         
-                        # I messaggi AIS NMEA iniziano con '!' o '$'
                         if raw_nmea_message_str.startswith(('!', '$')):
                             try:
-                                # Stampa il messaggio RAW prima di tentare il parsing
-                                print(f"RAW NMEA: {raw_nmea_message_str}")
+                                # Stampa il messaggio RAW sulla console (INFO)
+                                logger.info(f"RAW NMEA: {raw_nmea_message_str}")
                                 
-                                # Decodifica il messaggio AIS con pyais
                                 decoded_ais_message = decode(raw_nmea_message_str)
 
                                 if decoded_ais_message:
-                                    print("\n--- Messaggio AIS Decodificato ---")
-                                    # Stampa i dettagli del messaggio
-                                    print(f"Tipo Messaggio (MsgID): {decoded_ais_message.msg_type}")
-                                    print(f"MMSI: {decoded_ais_message.mmsi}")
+                                    logger.info("--- Messaggio AIS Decodificato ---")
                                     
-                                    # Esempi di campi comuni per diversi tipi di messaggi
+                                    # Formatta i dati decodificati per il log
+                                    log_data = {
+                                        "timestamp": time.time(), # Aggiungi un timestamp per la decodifica
+                                        "raw_nmea": raw_nmea_message_str,
+                                        "msg_type": decoded_ais_message.msg_type,
+                                        "mmsi": decoded_ais_message.mmsi,
+                                        "decoded_fields": {}
+                                    }
+
+                                    # Estrai campi comuni per loggare
                                     if decoded_ais_message.msg_type in [1, 2, 3]: # Messaggi di posizione
-                                        print(f"Status Navigazione: {getattr(decoded_ais_message, 'status', 'N/A')}")
-                                        print(f"Latitudine: {getattr(decoded_ais_message, 'lat', 'N/A')}")
-                                        print(f"Longitudine: {getattr(decoded_ais_message, 'lon', 'N/A')}")
-                                        print(f"Velocità (SOG): {getattr(decoded_ais_message, 'speed', 'N/A')} nodi")
-                                        print(f"Rotta (COG): {getattr(decoded_ais_message, 'course', 'N/A')} gradi")
-                                        print(f"Heading (True): {getattr(decoded_ais_message, 'heading', 'N/A')} gradi")
-                                    elif decoded_ais_message.msg_type == 5: # Dati nave statici e relativi al viaggio
-                                        print(f"Nome Nave: {getattr(decoded_ais_message, 'shipname', 'N/A')}")
-                                        print(f"Tipo Nave: {getattr(decoded_ais_message, 'ship_type', 'N/A')}")
-                                        print(f"Call Sign: {getattr(decoded_ais_message, 'callsign', 'N/A')}")
-                                        print(f"IMO: {getattr(decoded_ais_message, 'imo', 'N/A')}")
-                                        print(f"Dimensioni - To Bow: {getattr(decoded_ais_message, 'to_bow', 'N/A')} m")
-                                        print(f"Dimensioni - To Stern: {getattr(decoded_ais_message, 'to_stern', 'N/A')} m")
-                                        print(f"Dimensioni - To Port: {getattr(decoded_ais_message, 'to_port', 'N/A')} m")
-                                        print(f"Dimensioni - To Starboard: {getattr(decoded_ais_message, 'to_starboard', 'N/A')} m")
-                                    elif decoded_ais_message.msg_type == 18: # Classe B CS Standard Posizione Report
-                                        print(f"Latitudine: {getattr(decoded_ais_message, 'lat', 'N/A')}")
-                                        print(f"Longitudine: {getattr(decoded_ais_message, 'lon', 'N/A')}")
-                                        print(f"Velocità (SOG): {getattr(decoded_ais_message, 'speed', 'N/A')} nodi")
-                                        print(f"Rotta (COG): {getattr(decoded_ais_message, 'course', 'N/A')} gradi")
-                                        print(f"Unità (Class B): {getattr(decoded_ais_message, 'unit', 'N/A')}") # Typical for Msg 18
-                                    elif decoded_ais_message.msg_type == 24: # Classe B Static Data Report
-                                        # Messaggio 24 è spesso in due parti (0 e 1)
-                                        print(f"Parte Messaggio 24: {getattr(decoded_ais_message, 'part_num', 'N/A')}")
-                                        # Gli attributi dipendono dalla parte
-                                        if hasattr(decoded_ais_message, 'shipname'):
-                                            print(f"Nome Nave: {decoded_ais_message.shipname}")
-                                        if hasattr(decoded_ais_message, 'ship_type'):
-                                            print(f"Tipo Nave: {decoded_ais_message.ship_type}")
-                                        if hasattr(decoded_ais_message, 'callsign'):
-                                            print(f"Call Sign: {decoded_ais_message.callsign}")
+                                        log_data["decoded_fields"] = {
+                                            "status": getattr(decoded_ais_message, 'status', 'N/A'),
+                                            "lat": getattr(decoded_ais_message, 'lat', 'N/A'),
+                                            "lon": getattr(decoded_ais_message, 'lon', 'N/A'),
+                                            "speed": getattr(decoded_ais_message, 'speed', 'N/A'),
+                                            "course": getattr(decoded_ais_message, 'course', 'N/A'),
+                                            "heading": getattr(decoded_ais_message, 'heading', 'N/A')
+                                        }
+                                    elif decoded_ais_message.msg_type == 5: # Dati nave statici
+                                        log_data["decoded_fields"] = {
+                                            "shipname": getattr(decoded_ais_message, 'shipname', 'N/A'),
+                                            "ship_type": getattr(decoded_ais_message, 'ship_type', 'N/A'),
+                                            "callsign": getattr(decoded_ais_message, 'callsign', 'N/A'),
+                                            "imo": getattr(decoded_ais_message, 'imo', 'N/A'),
+                                            "dimensions": {
+                                                "to_bow": getattr(decoded_ais_message, 'to_bow', 'N/A'),
+                                                "to_stern": getattr(decoded_ais_message, 'to_stern', 'N/A'),
+                                                "to_port": getattr(decoded_ais_message, 'to_port', 'N/A'),
+                                                "to_starboard": getattr(decoded_ais_message, 'to_starboard', 'N/A')
+                                            }
+                                        }
+                                    # Puoi estendere questa logica per altri tipi di messaggi
                                     else:
-                                        # Per altri tipi di messaggi, stampa tutti i campi disponibili
-                                        print(f"Dettagli completi del messaggio (MsgID {decoded_ais_message.msg_type}):")
-                                        # I messaggi pyais sono istanze di dataclasses, possiamo iterare i loro campi
+                                        # Per tipi sconosciuti o meno comuni, logga tutti gli attributi pubblici
                                         for field in decoded_ais_message.__dataclass_fields__:
                                             attr_value = getattr(decoded_ais_message, field)
-                                            # Evita di stampare attributi "speciali" o metodi se non desiderato
                                             if not field.startswith('_') and not callable(attr_value):
-                                                print(f"  {field}: {attr_value}")
+                                                log_data["decoded_fields"][field] = attr_value
+
+                                    # Logga l'oggetto decodificato come stringa JSON per facile parsing futuro
+                                    logger.info(f"DECODED AIS (JSON): {json.dumps(log_data)}")
                                     
-                                    print("-" * 30) # Separatore per i messaggi decodificati
                                 else:
-                                    print(f"AVVISO: Nessun oggetto decodificato da pyais per: {raw_nmea_message_str}")
+                                    logger.warning(f"AVVISO: Nessun oggetto decodificato da pyais per: {raw_nmea_message_str}")
 
                             except Exception as e:
-                                print(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}")
+                                logger.error(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}", exc_info=True) # exc_info=True logga la traceback
+
                         else:
-                            # Non un messaggio NMEA valido (non inizia con '!' o '$')
-                            print(f"RAW non NMEA: {raw_nmea_message_str}")
+                            logger.debug(f"RAW non NMEA (saltato): {raw_nmea_message_str}") # Usiamo DEBUG per non inondare i log con non-AIS
                 else:
-                    break # Nessun delimitatore trovato, esci dal ciclo interno e attendi altri dati
+                    break
             
-            # Prevenire l'overflow del buffer
-            if len(received_buffer) > BUFFER_SIZE * 4: # Se il buffer è troppo grande (es. 4KB)
-                print(f"ATTENZIONE: Buffer dati in crescita ({len(received_buffer)} bytes) senza delimitatori. Svuotamento parziale.")
-                try:
-                    print(f"Contenuto parziale del buffer (inizio): {received_buffer[:100].decode('ascii', errors='replace')}...")
-                except:
-                    print(f"Contenuto parziale del buffer (inizio, binario): {received_buffer[:100]}...")
-                received_buffer = b"" # Svuota il buffer
+            if len(received_buffer) > BUFFER_SIZE * 4:
+                logger.warning(f"ATTENZIONE: Buffer dati in crescita ({len(received_buffer)} bytes) senza delimitatori. Svuotamento parziale.")
+                received_buffer = b""
 
     except ConnectionRefusedError:
-        print(f"Errore: Connessione rifiutata da {moxa_ip}:{moxa_port}.")
-        print(f"Assicurati che il Moxa sia acceso, l'IP e la porta siano corretti, e che il limite di connessioni non sia già stato raggiunto.")
+        logger.error(f"Errore: Connessione rifiutata da {moxa_ip}:{moxa_port}.")
+        logger.error(f"Assicurati che il Moxa sia acceso, l'IP e la porta siano corretti, e che il limite di connessioni non sia già stato raggiunto.")
     except socket.timeout:
-        print(f"Errore: Timeout della connessione a {moxa_ip}:{moxa_port}. Il Moxa non ha risposto entro il tempo limite.")
-        print(f"  Verifica la connettività di rete tra il tuo ambiente e il Moxa.")
+        logger.error(f"Errore: Timeout della connessione a {moxa_ip}:{moxa_port}. Il Moxa non ha risposto entro il tempo limite.")
+        logger.error(f"  Verifica la connettività di rete tra il tuo ambiente e il Moxa.")
     except Exception as e:
-        print(f"Si è verificato un errore: {e}")
+        logger.critical(f"Si è verificato un errore critico inatteso: {e}", exc_info=True)
     finally:
         if sock:
             sock.close()
-            print("Socket chiuso.")
+            logger.info("Socket chiuso.")
 
 if __name__ == "__main__":
     read_and_parse_moxa_ais_stream_interactive()
