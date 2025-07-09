@@ -7,6 +7,8 @@ FROM python:3.10-slim-buster
 # Tutti i comandi successivi verranno eseguiti in questa directory.
 WORKDIR /app
 
+ENV PIP_NO_SSL_VERIFY=1
+ENV PYTHONHTTPSVERIFY=0
 # Non eseguire come utente root per motivi di sicurezza, specialmente su OpenShift.
 # OpenShift preferisce un utente non-root arbitrario.
 # Se la tua immagine base non ha un utente non-root, puoi crearne uno.
