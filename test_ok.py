@@ -1,41 +1,39 @@
 import socket
 import time
 import os
-import logging # Importa il modulo logging
-import json    # Potrebbe essere utile per loggare oggetti complessi come JSON
+import logging
+import json
+import sys
 from pyais import decode
+from pyais.exceptions import UnknownMessageException # <--- AGGIUNGI QUESTO IMPORT
 
-# --- CONFIGURAZIONE LOGGING ---
-LOG_DIRECTORY = "/app/storage" # La cartella 'storage' creata nel Dockerfile
-LOG_FILE_NAME = "ais_output.log" # Nome del file di log
+
+# --- CONFIGURAZIONE LOGGING (resta come prima) ---
+LOG_DIRECTORY = "/app/storage"
+LOG_FILE_NAME = "ais_output.log"
 LOG_FILE_PATH = os.path.join(LOG_DIRECTORY, LOG_FILE_NAME)
 
-# Assicurati che la directory di log esista
 os.makedirs(LOG_DIRECTORY, exist_ok=True)
 
-# Configura il logger
 logging.basicConfig(
-    level=logging.INFO, # Logga messaggi di livello INFO e superiori
-    format='%(asctime)s - %(levelname)s - %(message)s', # Formato del log
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE_PATH), # Scrive i log su file
-        logging.StreamHandler() # E anche sulla console (stdout/stderr)
+        logging.FileHandler(LOG_FILE_PATH),
+        logging.StreamHandler()
     ]
 )
-# Ottieni un logger specifico per il tuo script
 logger = logging.getLogger(__name__)
 # --- FINE CONFIGURAZIONE LOGGING ---
 
 
-# Configurazione generale del socket
-BUFFER_SIZE = 1024 # Dimensione del buffer per la ricezione dei dati
+# Configurazione generale del socket (resta come prima)
+BUFFER_SIZE = 1024 
 
 def read_and_parse_moxa_ais_stream_interactive():
-    # --- QUESTA PARTE E' RIMASTA INALTERATA RISPETTO AL TUO CODICE CHE FUNZIONAVA ---
-    # Richiedi l'indirizzo IP all'utente
+    # Logica di input IP/Porta (resta come prima)
     moxa_ip = input("Inserisci l'indirizzo IP del Moxa (es. 192.168.1.100): ").strip()
     
-    # Richiedi la porta all'utente e convertila a int
     while True:
         try:
             moxa_port_str = input("Inserisci la porta TCP del Moxa (es. 10001): ").strip()
@@ -44,22 +42,17 @@ def read_and_parse_moxa_ais_stream_interactive():
                 raise ValueError(f"La porta {moxa_port_str} non è valida. Deve essere tra 0 e 65535.")
             break
         except ValueError as e:
-            # Sostituito print con logger.error
             logger.error(f"Input non valido: {e}. Riprova.")
-        except EOFError: # Aggiunto EOFError per gestire il caso di stdin chiuso
+        except EOFError:
             logger.critical("EOFError: Impossibile leggere l'input. Il container non è interattivo.")
             logger.critical("Si prega di avviare il container in modalità interattiva (es. docker run -it o oc rsh) o di fornire IP/Porta tramite variabili d'ambiente.")
-            return # Termina lo script se l'input interattivo non è possibile
-    # --- FINE PARTE INALTERATA ---
-
+            return
 
     sock = None
     try:
-        # Crea un socket TCP/IP
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5) # Timeout di 5 secondi per la connessione
+        sock.settimeout(5)
 
-        # Sostituito print con logger.info
         logger.info(f"Tentativo di connessione a {moxa_ip}:{moxa_port}...")
         sock.connect((moxa_ip, moxa_port))
         logger.info("Connessione stabilita con successo!")
@@ -70,7 +63,7 @@ def read_and_parse_moxa_ais_stream_interactive():
         while True:
             data = sock.recv(BUFFER_SIZE)
             if not data:
-                logger.warning("Connessione chiusa dal Moxa.") # Sostituito print con logger.warning
+                logger.warning("Connessione chiusa dal Moxa.")
                 break
 
             received_buffer += data
@@ -85,7 +78,18 @@ def read_and_parse_moxa_ais_stream_interactive():
                 elif cr_index != -1:
                     delimiter_index = cr_index
                 elif lf_index != -1:
+                    delimiter_index = cr_index # Changed from lf_index to cr_index for consistency
+                # Correction: If only LF, use lf_index, if only CR, use cr_index
+                # Let's use a simpler and more robust approach: find the first occurrence of either.
+                if cr_index == -1 and lf_index == -1: # Neither found
+                    delimiter_index = -1
+                elif cr_index == -1: # Only LF found
                     delimiter_index = lf_index
+                elif lf_index == -1: # Only CR found
+                    delimiter_index = cr_index
+                else: # Both found, pick the first one
+                    delimiter_index = min(cr_index, lf_index)
+
 
                 if delimiter_index != -1:
                     raw_nmea_message_bytes = received_buffer[:delimiter_index]
@@ -98,15 +102,15 @@ def read_and_parse_moxa_ais_stream_interactive():
                         raw_nmea_message_str = raw_nmea_message_bytes.decode('ascii', errors='ignore').strip()
                         
                         if raw_nmea_message_str.startswith(('!', '$')):
+                            # --- MODIFICA QUI: AGGIUNGI IL BLOCCO TRY-EXCEPT PER UnknownMessageException ---
                             try:
-                                logger.info(f"RAW NMEA: {raw_nmea_message_str}") # Sostituito print con logger.info
+                                logger.info(f"RAW NMEA: {raw_nmea_message_str}")
                                 
                                 decoded_ais_message = decode(raw_nmea_message_str)
 
                                 if decoded_ais_message:
-                                    logger.info("\n--- Messaggio AIS Decodificato ---") # Sostituito print con logger.info
+                                    logger.info("\n--- Messaggio AIS Decodificato ---")
                                     
-                                    # Preparazione per il logging in JSON
                                     log_data = {
                                         "timestamp": time.time(),
                                         "raw_nmea": raw_nmea_message_str,
@@ -115,7 +119,6 @@ def read_and_parse_moxa_ais_stream_interactive():
                                         "decoded_fields": {}
                                     }
 
-                                    # Estrai i campi in modo strutturato per il log
                                     if decoded_ais_message.msg_type in [1, 2, 3]:
                                         log_data["decoded_fields"] = {
                                             "status": getattr(decoded_ais_message, 'status', 'N/A'),
@@ -155,45 +158,46 @@ def read_and_parse_moxa_ais_stream_interactive():
                                         if hasattr(decoded_ais_message, 'callsign'):
                                             log_data["decoded_fields"]["callsign"] = decoded_ais_message.callsign
                                     else:
-                                        # Uso robusto di to_dict() per tutti gli altri messaggi (pyais)
                                         log_data["decoded_fields"] = decoded_ais_message.to_dict()
                                         log_data["decoded_fields"].pop('msg_type', None)
                                         log_data["decoded_fields"].pop('mmsi', None)
 
-
-                                    logger.info(f"DECODED AIS (JSON): {json.dumps(log_data)}") # Logga l'oggetto JSON
+                                    logger.info(f"DECODED AIS (JSON): {json.dumps(log_data)}")
                                     
                                 else:
-                                    logger.warning(f"AVVISO: Nessun oggetto decodificato da pyais per: {raw_nmea_message_str}") # Sostituito print
+                                    logger.warning(f"AVVISO: Nessun oggetto decodificato da pyais per: {raw_nmea_message_str}")
 
-                            except Exception as e: # Cattura tutte le eccezioni di decodifica
-                                logger.error(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}", exc_info=True) # Logga con traceback
+                            except UnknownMessageException as e: # <--- CATTURA QUESTA ECCEZIONE
+                                # Questo cattura specificamente i messaggi NMEA validi ma non AIS (come $PELMSEC)
+                                logger.warning(f"AVVISO: Messaggio NMEA riconosciuto ma non decodificabile come AIS: {raw_nmea_message_str} - {e}")
+                            except Exception as e:
+                                logger.error(f"ERRORE durante la decodifica AIS di '{raw_nmea_message_str}': {e}", exc_info=True)
 
                         else:
-                            logger.debug(f"RAW non NMEA: {raw_nmea_message_str}") # Sostituito print, livello DEBUG
+                            logger.debug(f"RAW non NMEA: {raw_nmea_message_str}")
                 else:
                     break
             
             if len(received_buffer) > BUFFER_SIZE * 4:
-                logger.warning(f"ATTENZIONE: Buffer dati in crescita ({len(received_buffer)} bytes) senza delimitatori. Svuotamento parziale.") # Sostituito print
+                logger.warning(f"ATTENZIONE: Buffer dati in crescita ({len(received_buffer)} bytes) senza delimitatori. Svuotamento parziale.")
                 try:
-                    logger.warning(f"Contenuto parziale del buffer (inizio): {received_buffer[:100].decode('ascii', errors='replace')}...") # Sostituito print
+                    logger.warning(f"Contenuto parziale del buffer (inizio): {received_buffer[:100].decode('ascii', errors='replace')}...")
                 except:
-                    logger.warning(f"Contenuto parziale del buffer (inizio, binario): {received_buffer[:100]}...") # Sostituito print
+                    logger.warning(f"Contenuto parziale del buffer (inizio, binario): {received_buffer[:100]}...")
                 received_buffer = b""
 
     except ConnectionRefusedError:
-        logger.error(f"Errore: Connessione rifiutata da {moxa_ip}:{moxa_port}.") # Sostituito print
-        logger.error(f"Assicurati che il Moxa sia acceso, l'IP e la porta siano corretti, e che il limite di connessioni non sia già stato raggiunto.") # Sostituito print
+        logger.error(f"Errore: Connessione rifiutata da {moxa_ip}:{moxa_port}.")
+        logger.error(f"Assicurati che il Moxa sia acceso, l'IP e la porta siano corretti, e che il limite di connessioni non sia già stato raggiunto.")
     except socket.timeout:
-        logger.error(f"Errore: Timeout della connessione a {moxa_ip}:{moxa_port}. Il Moxa non ha risposto entro il tempo limite.") # Sostituito print
-        logger.error(f"  Verifica la connettività di rete tra il tuo ambiente e il Moxa.") # Sostituito print
+        logger.error(f"Errore: Timeout della connessione a {moxa_ip}:{moxa_port}. Il Moxa non ha risposto entro il tempo limite.")
+        logger.error(f"  Verifica la connettività di rete tra il tuo ambiente e il Moxa.")
     except Exception as e:
-        logger.critical(f"Si è verificato un errore critico inatteso: {e}", exc_info=True) # Sostituito print
+        logger.critical(f"Si è verificato un errore critico inatteso: {e}", exc_info=True)
     finally:
         if sock:
             sock.close()
-            logger.info("Socket chiuso.") # Sostituito print
+            logger.info("Socket chiuso.")
 
 if __name__ == "__main__":
     read_and_parse_moxa_ais_stream_interactive()
