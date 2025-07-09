@@ -35,7 +35,7 @@ COPY requirements.txt .
 # --no-cache-dir evita di memorizzare nella cache i pacchetti scaricati, riducendo le dimensioni dell'immagine.
 RUN pip install --upgrade pip
 RUN pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org -r requirements.txt
-RUN ap
+
 # Copia il tuo script Python nella directory di lavoro del container.
 COPY . .
 
